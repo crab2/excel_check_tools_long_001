@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="行业规模 Excel 核对工具"
+    Manufacturer="Industry Excel Checker"
+    Version="$(var.AppVersion)"
+    Language="2052"
+    UpgradeCode="B2B19212-791D-4D06-AC0E-705995B6123D"
+    Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="已安装更新版本的行业规模 Excel 核对工具。" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Feature Id="MainFeature" Title="行业规模 Excel 核对工具" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Industry Excel Checker" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="行业规模 Excel 核对工具" />
+    </StandardDirectory>
+  </Fragment>
+
+  <Fragment>
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="*" Bitness="always64">
+        <File
+          Id="MainExecutableFile"
+          Source="$(var.SourceDir)\industry-excel-checker.exe"
+          KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="StartMenuShortcut" Guid="*" Bitness="always64">
+        <Shortcut
+          Id="ApplicationStartMenuShortcut"
+          Name="行业规模 Excel 核对工具"
+          Description="核对 Excel 中的企业规模分类"
+          Target="[INSTALLFOLDER]industry-excel-checker.exe"
+          WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue
+          Root="HKLM"
+          Key="Software\IndustryExcelChecker"
+          Name="StartMenuShortcut"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>

@@ -1,0 +1,122 @@
+name: Release Windows MSI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-msi:
+    name: Build and publish MSI
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    env:
+      CARGO_TERM_COLOR: always
+      BINARY_NAME: industry-excel-checker.exe
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate tag and package version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
+            throw "Release tags must use the format vMAJOR.MINOR.PATCH; received '$tag'."
+          }
+
+          $version = $Matches.version
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          $package = $metadata.packages | Where-Object { $_.name -eq "industry-excel-checker" }
+          if ($null -eq $package) {
+            throw "Could not find the industry-excel-checker package in Cargo metadata."
+          }
+          if ($package.version -ne $version) {
+            throw "Tag version $version does not match Cargo.toml version $($package.version)."
+          }
+
+          "APP_VERSION=$version" >> $env:GITHUB_ENV
+          "MSI_NAME=industry-excel-checker-$version-x64.msi" >> $env:GITHUB_ENV
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "msi_name=industry-excel-checker-$version-x64.msi" >> $env:GITHUB_OUTPUT
+
+      - name: Build release executable
+        run: cargo build --locked --release
+
+      - name: Install WiX Toolset
+        run: dotnet tool install --tool-path .wix wix --version 4.0.6
+
+      - name: Build MSI package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          & .\.wix\wix.exe build installer/Package.wxs `
+            -arch x64 `
+            -d "AppVersion=$env:APP_VERSION" `
+            -d "SourceDir=$((Resolve-Path target/release).Path)" `
+            -out "dist/$env:MSI_NAME"
+
+      - name: Verify MSI contents
+        shell: pwsh
+        run: |
+          $msiPath = (Resolve-Path "dist/$env:MSI_NAME").Path
+          $extractPath = Join-Path $env:RUNNER_TEMP "industry-excel-checker-msi"
+          New-Item -ItemType Directory -Force -Path $extractPath | Out-Null
+
+          $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            "/a",
+            "`"$msiPath`"",
+            "/qn",
+            "TARGETDIR=`"$extractPath`""
+          )
+          if ($process.ExitCode -ne 0) {
+            throw "Administrative MSI extraction failed with exit code $($process.ExitCode)."
+          }
+
+          $executable = Get-ChildItem -Path $extractPath -Recurse -File -Filter $env:BINARY_NAME
+          if ($null -eq $executable) {
+            throw "$env:BINARY_NAME was not found in the generated MSI."
+          }
+
+          $hash = (Get-FileHash -Algorithm SHA256 $msiPath).Hash.ToLowerInvariant()
+          "$hash  $env:MSI_NAME" | Set-Content -Encoding ascii "dist/$env:MSI_NAME.sha256"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msi-${{ steps.version.outputs.version }}
+          path: |
+            dist/${{ steps.version.outputs.msi_name }}
+            dist/${{ steps.version.outputs.msi_name }}.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $assets = @(
+            "dist/$env:MSI_NAME",
+            "dist/$env:MSI_NAME.sha256"
+          )
+
+          gh release view $tag --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --clobber --repo "${{ github.repository }}"
+          } else {
+            gh release create $tag @assets `
+              --repo "${{ github.repository }}" `
+              --title "行业规模 Excel 核对工具 $env:APP_VERSION" `
+              --generate-notes `
+              --verify-tag
+          }

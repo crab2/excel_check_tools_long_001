@@ -1,0 +1,25 @@
+[package]
+name = "industry-excel-checker"
+version = "0.1.0"
+edition = "2024"
+description = "基于行业分类与企业划型标准的 Excel 桌面核对工具"
+
+[dependencies]
+anyhow = "1"
+calamine = { version = "0.31", features = ["dates"] }
+directories = "6"
+eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+regex = "1"
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+umya-spreadsheet = "2.3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
