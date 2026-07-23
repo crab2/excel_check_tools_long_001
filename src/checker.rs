@@ -1,5 +1,5 @@
 use crate::hierarchy::HierarchyIndex;
-use crate::model::{CompanySize, MetricValues, RuleSet};
+use crate::model::{Classification, CompanySize, MetricKind, MetricValues, RuleSet};
 use anyhow::{Context, Result, anyhow};
 use calamine::{Data, Reader, open_workbook_auto};
 use std::path::{Path, PathBuf};
@@ -48,7 +48,8 @@ impl CheckOptions {
 pub enum RowStatus {
     Changed,
     Unchanged,
-    Skipped,
+    Incomplete,
+    Failed,
 }
 
 impl RowStatus {
@@ -56,7 +57,8 @@ impl RowStatus {
         match self {
             Self::Changed => "待修改",
             Self::Unchanged => "一致",
-            Self::Skipped => "已跳过",
+            Self::Incomplete => "数据不完整",
+            Self::Failed => "处理失败",
         }
     }
 }
@@ -81,7 +83,8 @@ pub struct AnalysisSummary {
     pub total_rows: usize,
     pub changed_rows: usize,
     pub unchanged_rows: usize,
-    pub skipped_rows: usize,
+    pub incomplete_rows: usize,
+    pub failed_rows: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -135,16 +138,16 @@ pub fn analyze_workbook(
                     None,
                     None,
                     None,
-                    RowStatus::Skipped,
-                    "跳过：E列客户行业四级为空".to_owned(),
+                    RowStatus::Failed,
+                    "处理失败：E列客户行业四级为空".to_owned(),
                 )
             } else if !path.found_in_reference {
                 (
                     None,
                     None,
                     None,
-                    RowStatus::Skipped,
-                    format!("跳过：行业细类配置中未找到 {trusted_code}"),
+                    RowStatus::Failed,
+                    format!("处理失败：行业细类配置中未找到 {trusted_code}"),
                 )
             } else if let Some(rule) = rules.find_for_codes(&path.codes) {
                 let values = MetricValues {
@@ -153,7 +156,8 @@ pub fn analyze_workbook(
                     revenue: cell_number(row.get(8)).map(|value| value / 10_000.0),
                 };
                 match rule.classify(&values) {
-                    Ok(size) => {
+                    Ok(classification) if classification.is_complete() => {
+                        let size = classification.size;
                         let changed = CompanySize::parse(&original_value) != Some(size);
                         let status = if changed {
                             RowStatus::Changed
@@ -179,30 +183,39 @@ pub fn analyze_workbook(
                             annotation,
                         )
                     }
-                    Err(missing_metrics) => {
-                        let labels = missing_metrics
-                            .iter()
-                            .map(|metric| {
-                                format!("{}({}列)", metric.label(), metric.source_column())
-                            })
-                            .collect::<Vec<_>>()
-                            .join("、");
+                    Ok(classification) => {
+                        let annotation = incomplete_annotation(
+                            &original_value,
+                            &classification,
+                            &rule.industry_code,
+                            &rule.industry_name,
+                        );
                         (
                             Some(rule.industry_code.clone()),
                             Some(rule.industry_name.clone()),
-                            None,
-                            RowStatus::Skipped,
-                            format!("跳过：缺少{labels}"),
+                            Some(classification.size),
+                            RowStatus::Incomplete,
+                            annotation,
                         )
                     }
+                    Err(missing_metrics) => (
+                        Some(rule.industry_code.clone()),
+                        Some(rule.industry_name.clone()),
+                        None,
+                        RowStatus::Failed,
+                        format!(
+                            "处理失败：缺少或非法{}，没有可用于划型的指标",
+                            metric_labels(&missing_metrics)
+                        ),
+                    ),
                 }
             } else {
                 (
                     None,
                     None,
                     None,
-                    RowStatus::Skipped,
-                    format!("跳过：{} 未匹配到划型标准", path.full_code),
+                    RowStatus::Failed,
+                    format!("处理失败：{} 未匹配到划型标准", path.full_code),
                 )
             };
 
@@ -210,7 +223,8 @@ pub fn analyze_workbook(
         match status {
             RowStatus::Changed => summary.changed_rows += 1,
             RowStatus::Unchanged => summary.unchanged_rows += 1,
-            RowStatus::Skipped => summary.skipped_rows += 1,
+            RowStatus::Incomplete => summary.incomplete_rows += 1,
+            RowStatus::Failed => summary.failed_rows += 1,
         }
         rows.push(CheckRow {
             row_number,
@@ -299,6 +313,39 @@ fn display_or_empty(value: &str) -> &str {
     }
 }
 
+fn incomplete_annotation(
+    original_value: &str,
+    classification: &Classification,
+    rule_code: &str,
+    rule_name: &str,
+) -> String {
+    let scope = if classification.used_metrics.len() == 1 {
+        "单一字段"
+    } else {
+        "部分字段"
+    };
+    let comparison = if CompanySize::parse(original_value) == Some(classification.size) {
+        "准确"
+    } else {
+        "不准确"
+    };
+    format!(
+        "{scope}判断{comparison}：按{}暂判为{}，C列为{}；缺少或非法{}，数据不完整（匹配标准 {rule_code} {rule_name}）",
+        metric_labels(&classification.used_metrics),
+        classification.size,
+        display_or_empty(original_value),
+        metric_labels(&classification.missing_metrics),
+    )
+}
+
+fn metric_labels(metrics: &[MetricKind]) -> String {
+    metrics
+        .iter()
+        .map(|metric| format!("{}({}列)", metric.label(), metric.source_column()))
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
 pub fn column_label_to_index(label: &str) -> Result<usize> {
     let label = label.trim().to_ascii_uppercase();
     if label.is_empty() || label.len() > 3 || !label.chars().all(|ch| ch.is_ascii_alphabetic()) {
@@ -348,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn real_fixture_produces_expected_changes_and_skips() {
+    fn real_fixture_produces_expected_outcomes() {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/对公贷-.xlsx");
         if !source.exists() {
             return;
@@ -358,14 +405,46 @@ mod tests {
         let rules = load_default_rules().unwrap();
         let report = analyze_workbook(&CheckOptions::new(source), &hierarchy, &rules).unwrap();
         assert_eq!(report.summary.total_rows, 1_256);
-        assert_eq!(report.summary.changed_rows, 2);
-        assert_eq!(report.summary.skipped_rows, 155);
+        assert_eq!(report.summary.changed_rows, 39);
+        assert_eq!(report.summary.unchanged_rows, 968);
+        assert_eq!(report.summary.incomplete_rows, 203);
+        assert_eq!(report.summary.failed_rows, 46);
+        assert_eq!(
+            report.summary.total_rows,
+            report.summary.changed_rows
+                + report.summary.unchanged_rows
+                + report.summary.incomplete_rows
+                + report.summary.failed_rows
+        );
+        let employees_only_row = report
+            .rows
+            .iter()
+            .find(|row| row.row_number == 983)
+            .unwrap();
+        assert_eq!(employees_only_row.status, RowStatus::Incomplete);
+        assert_eq!(
+            employees_only_row.calculated_size,
+            Some(CompanySize::Medium)
+        );
+        assert!(
+            employees_only_row
+                .annotation
+                .starts_with("单一字段判断准确")
+        );
+        assert!(employees_only_row.annotation.contains("从业人员数(G列)"));
+        assert!(employees_only_row.annotation.contains("营业收入(I列)"));
+        assert!(employees_only_row.annotation.contains("数据不完整"));
+        assert!(report.rows.iter().any(|row| {
+            row.status == RowStatus::Incomplete && row.annotation.starts_with("单一字段判断不准确")
+        }));
         let changed_rows = report
             .rows
             .iter()
             .filter(|row| row.status == RowStatus::Changed)
             .map(|row| row.row_number)
             .collect::<Vec<_>>();
-        assert_eq!(changed_rows, vec![627, 955]);
+        assert_eq!(changed_rows.len(), report.summary.changed_rows);
+        assert!(changed_rows.contains(&627));
+        assert!(changed_rows.contains(&955));
     }
 }

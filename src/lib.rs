@@ -14,6 +14,6 @@ pub use hierarchy::{
     CategoryRepository, CategorySet, HierarchyIndex, IndustryCategory, IndustryPath,
     load_categories_from_path, load_default_categories,
 };
-pub use model::{CompanySize, IndustryRule, MetricKind, MetricRule, RuleSet};
+pub use model::{Classification, CompanySize, IndustryRule, MetricKind, MetricRule, RuleSet};
 pub use rules::{RuleRepository, load_default_rules, load_rules_from_path};
 pub use settings::{AppSettings, SettingsRepository};

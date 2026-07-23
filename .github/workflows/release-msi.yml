@@ -63,6 +63,7 @@ jobs:
             -arch x64 `
             -d "AppVersion=$env:APP_VERSION" `
             -d "SourceDir=$((Resolve-Path target/release).Path)" `
+            -d "IconPath=$((Resolve-Path assets/app-icon.ico).Path)" `
             -out "dist/$env:MSI_NAME"
 
       - name: Verify MSI contents

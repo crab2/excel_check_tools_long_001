@@ -10,6 +10,8 @@
 
     <MajorUpgrade DowngradeErrorMessage="已安装更新版本的行业规模 Excel 核对工具。" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <Icon Id="ApplicationIcon" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="ApplicationIcon" />
 
     <Feature Id="MainFeature" Title="行业规模 Excel 核对工具" Level="1">
       <ComponentRef Id="MainExecutable" />
@@ -43,6 +45,7 @@
           Name="行业规模 Excel 核对工具"
           Description="核对 Excel 中的企业规模分类"
           Target="[INSTALLFOLDER]industry-excel-checker.exe"
+          Icon="ApplicationIcon"
           WorkingDirectory="INSTALLFOLDER" />
         <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
         <RegistryValue

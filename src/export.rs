@@ -3,6 +3,8 @@ use anyhow::{Context, Result, anyhow};
 use std::path::Path;
 
 const ANNOTATION_HEADER: &str = "核对修改说明";
+const INCOMPLETE_ROW_FILL: &str = "FFFFF2CC";
+const FAILED_ROW_FILL: &str = "FFF4CCCC";
 
 pub fn export_checked_workbook(
     report: &AnalysisReport,
@@ -49,6 +51,7 @@ pub fn export_checked_workbook(
     worksheet
         .get_cell_mut((annotation_index as u32, 1_u32))
         .set_value(ANNOTATION_HEADER);
+    let highlight_end_column = worksheet.get_highest_column().max(annotation_index as u32);
 
     for row in &report.rows {
         if row.status == RowStatus::Changed {
@@ -61,10 +64,21 @@ pub fn export_checked_workbook(
             worksheet
                 .get_cell_mut((annotation_index as u32, row.row_number))
                 .set_value(&row.annotation);
-        } else if row.status == RowStatus::Skipped && report.annotate_skipped_rows {
+        } else if matches!(row.status, RowStatus::Incomplete | RowStatus::Failed)
+            && report.annotate_skipped_rows
+        {
             worksheet
                 .get_cell_mut((annotation_index as u32, row.row_number))
                 .set_value(&row.annotation);
+        }
+
+        let fill = match row.status {
+            RowStatus::Incomplete => Some(INCOMPLETE_ROW_FILL),
+            RowStatus::Failed => Some(FAILED_ROW_FILL),
+            RowStatus::Changed | RowStatus::Unchanged => None,
+        };
+        if let Some(fill) = fill {
+            highlight_row(worksheet, row.row_number, highlight_end_column, fill);
         }
     }
 
@@ -92,7 +106,8 @@ fn ensure_annotation_cells_available(
     );
     for row in &report.rows {
         let will_annotate = row.status == RowStatus::Changed
-            || (row.status == RowStatus::Skipped && report.annotate_skipped_rows);
+            || (matches!(row.status, RowStatus::Incomplete | RowStatus::Failed)
+                && report.annotate_skipped_rows);
         if will_annotate {
             check_annotation_conflict(
                 worksheet,
@@ -121,6 +136,19 @@ fn ensure_annotation_cells_available(
         displayed.join("、"),
         suffix
     ))
+}
+
+fn highlight_row(
+    worksheet: &mut umya_spreadsheet::Worksheet,
+    row_number: u32,
+    end_column: u32,
+    fill: &str,
+) {
+    for column in 1..=end_column {
+        worksheet
+            .get_style_mut((column, row_number))
+            .set_background_color(fill);
+    }
 }
 
 fn check_annotation_conflict(
@@ -193,7 +221,13 @@ mod tests {
             .filter(|row| source_range.get((*row, 2)) != output_range.get((*row, 2)))
             .map(|row| row as u32 + 1)
             .collect::<Vec<_>>();
-        assert_eq!(changed_rows, vec![627, 955]);
+        let expected_changed_rows = report
+            .rows
+            .iter()
+            .filter(|row| row.status == RowStatus::Changed)
+            .map(|row| row.row_number)
+            .collect::<Vec<_>>();
+        assert_eq!(changed_rows, expected_changed_rows);
 
         for row in 0..source_range.height() {
             for column in 0..source_range.width() {
@@ -210,15 +244,15 @@ mod tests {
         }
 
         assert_eq!(cell_text(output_range.get((0, 16))), ANNOTATION_HEADER);
-        let mut written_skips = 0;
+        let mut written_exceptions = 0;
         for row in &report.rows {
             let expected = match row.status {
                 RowStatus::Changed => row.annotation.as_str(),
-                RowStatus::Skipped if report.annotate_skipped_rows => {
-                    written_skips += 1;
+                RowStatus::Incomplete | RowStatus::Failed if report.annotate_skipped_rows => {
+                    written_exceptions += 1;
                     row.annotation.as_str()
                 }
-                RowStatus::Unchanged | RowStatus::Skipped => "",
+                RowStatus::Unchanged | RowStatus::Incomplete | RowStatus::Failed => "",
             };
             assert_eq!(
                 cell_text(output_range.get(((row.row_number - 1) as usize, 16))),
@@ -227,7 +261,10 @@ mod tests {
                 row.row_number
             );
         }
-        assert_eq!(written_skips, report.summary.skipped_rows);
+        assert_eq!(
+            written_exceptions,
+            report.summary.incomplete_rows + report.summary.failed_rows
+        );
         assert!(cell_text(output_range.get((626, 16))).starts_with("C列："));
         assert!(cell_text(output_range.get((954, 16))).starts_with("C列："));
 
@@ -267,6 +304,92 @@ mod tests {
         assert_eq!(fs::read(&output).unwrap(), b"existing output");
     }
 
+    #[test]
+    fn export_highlights_incomplete_and_failed_rows_without_changing_classification() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.xlsx");
+        let output = directory.path().join("output.xlsx");
+        let mut workbook = umya_spreadsheet::new_file();
+        let worksheet = workbook.get_sheet_by_name_mut("Sheet1").unwrap();
+        worksheet.get_cell_mut("C2").set_value("中型");
+        worksheet.get_cell_mut("C3").set_value("小型");
+        umya_spreadsheet::writer::xlsx::write(&workbook, &source).unwrap();
+        let report = AnalysisReport {
+            source_path: source,
+            sheet_name: "Sheet1".to_owned(),
+            annotation_column: "Q".to_owned(),
+            annotate_skipped_rows: true,
+            rows: vec![
+                CheckRow {
+                    row_number: 2,
+                    customer_id: String::new(),
+                    account_name: String::new(),
+                    trusted_code: "C3833".to_owned(),
+                    industry_path: String::new(),
+                    matched_rule_code: Some("C".to_owned()),
+                    matched_rule_name: Some("制造业".to_owned()),
+                    original_value: "中型".to_owned(),
+                    calculated_size: Some(CompanySize::Small),
+                    status: RowStatus::Incomplete,
+                    annotation: "单一字段判断不准确：数据不完整".to_owned(),
+                },
+                CheckRow {
+                    row_number: 3,
+                    customer_id: String::new(),
+                    account_name: String::new(),
+                    trusted_code: String::new(),
+                    industry_path: String::new(),
+                    matched_rule_code: None,
+                    matched_rule_name: None,
+                    original_value: "小型".to_owned(),
+                    calculated_size: None,
+                    status: RowStatus::Failed,
+                    annotation: "处理失败：行业代码为空".to_owned(),
+                },
+            ],
+            summary: AnalysisSummary {
+                total_rows: 2,
+                changed_rows: 0,
+                unchanged_rows: 0,
+                incomplete_rows: 1,
+                failed_rows: 1,
+            },
+        };
+
+        export_checked_workbook(&report, &output).unwrap();
+
+        let output_book = umya_spreadsheet::reader::xlsx::read(&output).unwrap();
+        let output_sheet = output_book.get_sheet_by_name("Sheet1").unwrap();
+        assert_eq!(output_sheet.get_cell("C2").unwrap().get_value(), "中型");
+        assert_eq!(output_sheet.get_cell("C3").unwrap().get_value(), "小型");
+        for column in [1_u32, 3, 17] {
+            assert_eq!(
+                output_sheet
+                    .get_style((column, 2_u32))
+                    .get_background_color()
+                    .unwrap()
+                    .get_argb(),
+                INCOMPLETE_ROW_FILL
+            );
+            assert_eq!(
+                output_sheet
+                    .get_style((column, 3_u32))
+                    .get_background_color()
+                    .unwrap()
+                    .get_argb(),
+                FAILED_ROW_FILL
+            );
+        }
+        assert_eq!(
+            output_sheet.get_cell("Q2").unwrap().get_value(),
+            "单一字段判断不准确：数据不完整"
+        );
+        assert_eq!(
+            output_sheet.get_cell("Q3").unwrap().get_value(),
+            "处理失败：行业代码为空"
+        );
+    }
+
     fn read_first_sheet(path: &Path) -> Range<Data> {
         let mut workbook = open_workbook_auto(path).unwrap();
         let sheet_name = workbook.sheet_names().first().unwrap().clone();
@@ -303,7 +426,8 @@ mod tests {
                 total_rows: 1,
                 changed_rows: 1,
                 unchanged_rows: 0,
-                skipped_rows: 0,
+                incomplete_rows: 0,
+                failed_rows: 0,
             },
         }
     }

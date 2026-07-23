@@ -138,6 +138,19 @@ pub struct IndustryRule {
     pub metrics: Vec<MetricRule>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Classification {
+    pub size: CompanySize,
+    pub used_metrics: Vec<MetricKind>,
+    pub missing_metrics: Vec<MetricKind>,
+}
+
+impl Classification {
+    pub fn is_complete(&self) -> bool {
+        self.missing_metrics.is_empty()
+    }
+}
+
 impl IndustryRule {
     pub fn validate(&self) -> Result<(), String> {
         if self.industry_name.trim().is_empty() {
@@ -180,7 +193,7 @@ impl IndustryRule {
         Ok(())
     }
 
-    pub fn classify(&self, values: &MetricValues) -> Result<CompanySize, Vec<MetricKind>> {
+    pub fn classify(&self, values: &MetricValues) -> Result<Classification, Vec<MetricKind>> {
         let mut resolved = Vec::with_capacity(self.metrics.len());
         let mut missing = Vec::new();
         for metric_rule in &self.metrics {
@@ -191,36 +204,45 @@ impl IndustryRule {
                 _ => missing.push(metric_rule.metric),
             }
         }
-        // 微型标准使用“或”：任一已知指标低于小型下限即可确定为微型。
-        if resolved
-            .iter()
-            .any(|(metric_rule, value)| *value < metric_rule.small_min)
-        {
-            return Ok(CompanySize::Micro);
-        }
-        if !missing.is_empty() {
+
+        if resolved.is_empty() {
             return Err(missing);
         }
 
-        if resolved
+        // 数据不完整时仅使用现有指标给出暂判结果，交由上层明确标记为非正式结论。
+        let size = if resolved
+            .iter()
+            .any(|(metric_rule, value)| *value < metric_rule.small_min)
+        {
+            CompanySize::Micro
+        } else if resolved
             .iter()
             .all(|(metric_rule, value)| *value >= metric_rule.large_min)
         {
-            return Ok(CompanySize::Large);
-        }
-        if resolved
+            CompanySize::Large
+        } else if resolved
             .iter()
             .all(|(metric_rule, value)| *value >= metric_rule.medium_min)
         {
-            return Ok(CompanySize::Medium);
-        }
-        if resolved
+            CompanySize::Medium
+        } else if resolved
             .iter()
             .all(|(metric_rule, value)| *value >= metric_rule.small_min)
         {
-            return Ok(CompanySize::Small);
-        }
-        Ok(CompanySize::Micro)
+            CompanySize::Small
+        } else {
+            CompanySize::Micro
+        };
+        let used_metrics = resolved
+            .iter()
+            .map(|(metric_rule, _)| metric_rule.metric)
+            .collect();
+
+        Ok(Classification {
+            size,
+            used_metrics,
+            missing_metrics: missing,
+        })
     }
 }
 
@@ -351,7 +373,7 @@ mod tests {
             revenue: Some(1_500.0),
             ..MetricValues::default()
         };
-        assert_eq!(rule.classify(&values), Ok(CompanySize::Small));
+        assert_eq!(rule.classify(&values).unwrap().size, CompanySize::Small);
     }
 
     #[test]
@@ -362,17 +384,24 @@ mod tests {
             revenue: Some(2_000.0),
             ..MetricValues::default()
         };
-        assert_eq!(rule.classify(&values), Ok(CompanySize::Medium));
+        assert_eq!(rule.classify(&values).unwrap().size, CompanySize::Medium);
     }
 
     #[test]
-    fn missing_metric_is_reported() {
+    fn available_metric_produces_an_incomplete_classification() {
         let rule = manufacturing_rule();
         let values = MetricValues {
             employees: Some(300.0),
             ..MetricValues::default()
         };
-        assert_eq!(rule.classify(&values), Err(vec![MetricKind::Revenue]));
+        assert_eq!(
+            rule.classify(&values),
+            Ok(Classification {
+                size: CompanySize::Medium,
+                used_metrics: vec![MetricKind::Employees],
+                missing_metrics: vec![MetricKind::Revenue],
+            })
+        );
     }
 
     #[test]
@@ -383,7 +412,23 @@ mod tests {
             revenue: None,
             ..MetricValues::default()
         };
-        assert_eq!(rule.classify(&values), Ok(CompanySize::Micro));
+        assert_eq!(
+            rule.classify(&values),
+            Ok(Classification {
+                size: CompanySize::Micro,
+                used_metrics: vec![MetricKind::Employees],
+                missing_metrics: vec![MetricKind::Revenue],
+            })
+        );
+    }
+
+    #[test]
+    fn no_available_metric_is_reported_as_a_failure() {
+        let rule = manufacturing_rule();
+        assert_eq!(
+            rule.classify(&MetricValues::default()),
+            Err(vec![MetricKind::Employees, MetricKind::Revenue])
+        );
     }
 
     #[test]

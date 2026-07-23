@@ -1649,6 +1649,7 @@ dependencies = [
  "calamine",
  "directories",
  "eframe",
+ "image",
  "regex",
  "rfd",
  "serde",

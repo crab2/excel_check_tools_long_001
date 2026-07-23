@@ -46,18 +46,26 @@ enum RowFilter {
     All,
     Changed,
     Unchanged,
-    Skipped,
+    Incomplete,
+    Failed,
 }
 
 impl RowFilter {
-    const ALL: [Self; 4] = [Self::All, Self::Changed, Self::Unchanged, Self::Skipped];
+    const ALL: [Self; 5] = [
+        Self::All,
+        Self::Changed,
+        Self::Unchanged,
+        Self::Incomplete,
+        Self::Failed,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Self::All => "全部",
             Self::Changed => "待修改",
             Self::Unchanged => "一致",
-            Self::Skipped => "已跳过",
+            Self::Incomplete => "数据不完整",
+            Self::Failed => "处理失败",
         }
     }
 
@@ -66,7 +74,8 @@ impl RowFilter {
             Self::All => true,
             Self::Changed => status == RowStatus::Changed,
             Self::Unchanged => status == RowStatus::Unchanged,
-            Self::Skipped => status == RowStatus::Skipped,
+            Self::Incomplete => status == RowStatus::Incomplete,
+            Self::Failed => status == RowStatus::Failed,
         }
     }
 }
@@ -240,11 +249,14 @@ impl IndustryCheckApp {
             match result {
                 Ok(report) => {
                     let changed = report.summary.changed_rows;
-                    let skipped = report.summary.skipped_rows;
+                    let incomplete = report.summary.incomplete_rows;
+                    let failed = report.summary.failed_rows;
                     self.report = Some(report);
                     self.set_notice(
                         NoticeLevel::Success,
-                        format!("核对完成：{changed} 行待修改，{skipped} 行已跳过"),
+                        format!(
+                            "核对完成：{changed} 行待修改，{incomplete} 行数据不完整，{failed} 行处理失败"
+                        ),
                     );
                 }
                 Err(error) => {
@@ -577,7 +589,10 @@ impl IndustryCheckApp {
                     );
                     ui.add_space(12.0);
                     if ui
-                        .checkbox(&mut self.settings.annotate_skipped_rows, "标注跳过原因")
+                        .checkbox(
+                            &mut self.settings.annotate_skipped_rows,
+                            "标注数据不完整/处理失败原因",
+                        )
                         .changed()
                     {
                         settings_changed = true;
@@ -637,11 +652,17 @@ impl IndustryCheckApp {
                 .corner_radius(6)
                 .inner_margin(Margin::symmetric(14, 10))
                 .show(ui, |ui| {
-                    ui.columns(4, |columns| {
+                    ui.columns(5, |columns| {
                         summary_item(&mut columns[0], "数据行", summary.total_rows, INK);
                         summary_item(&mut columns[1], "待修改", summary.changed_rows, WARNING);
                         summary_item(&mut columns[2], "一致", summary.unchanged_rows, ACCENT);
-                        summary_item(&mut columns[3], "已跳过", summary.skipped_rows, MUTED);
+                        summary_item(
+                            &mut columns[3],
+                            "数据不完整",
+                            summary.incomplete_rows,
+                            WARNING,
+                        );
+                        summary_item(&mut columns[4], "处理失败", summary.failed_rows, DANGER);
                     });
                 });
             ui.add_space(12.0);
@@ -794,7 +815,8 @@ impl IndustryCheckApp {
                                     let status_color = match row.status {
                                         RowStatus::Changed => WARNING,
                                         RowStatus::Unchanged => ACCENT,
-                                        RowStatus::Skipped => MUTED,
+                                        RowStatus::Incomplete => WARNING,
+                                        RowStatus::Failed => DANGER,
                                     };
                                     table_cell(ui, widths[7], row.status.label(), status_color);
                                     table_cell(

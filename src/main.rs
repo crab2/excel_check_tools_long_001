@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod icon;
 
 fn main() -> eframe::Result {
     let _ = tracing_subscriber::fmt()
@@ -13,7 +14,8 @@ fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1320.0, 820.0])
-            .with_min_inner_size([1040.0, 680.0]),
+            .with_min_inner_size([1040.0, 680.0])
+            .with_icon(icon::app_icon()),
         centered: true,
         ..Default::default()
     };
