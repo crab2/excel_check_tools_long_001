@@ -330,7 +330,7 @@ fn incomplete_annotation(
         "不准确"
     };
     format!(
-        "{scope}判断{comparison}：按{}暂判为{}，C列为{}；缺少或非法{}，数据不完整（匹配标准 {rule_code} {rule_name}）",
+        "{scope}判断{comparison}：按{}暂判为{}，C列原值为{}；缺少或非法{}，数据不完整（匹配标准 {rule_code} {rule_name}）",
         metric_labels(&classification.used_metrics),
         classification.size,
         display_or_empty(original_value),

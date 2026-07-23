@@ -1,10 +1,13 @@
-use crate::checker::{AnalysisReport, RowStatus, column_index_to_label, column_label_to_index};
+use crate::checker::{
+    AnalysisReport, CheckRow, RowStatus, column_index_to_label, column_label_to_index,
+};
 use anyhow::{Context, Result, anyhow};
 use std::path::Path;
 
 const ANNOTATION_HEADER: &str = "核对修改说明";
 const INCOMPLETE_ROW_FILL: &str = "FFFFF2CC";
 const FAILED_ROW_FILL: &str = "FFF4CCCC";
+const CHANGED_CELL_FILL: &str = "FFC6EFCE";
 
 pub fn export_checked_workbook(
     report: &AnalysisReport,
@@ -54,13 +57,16 @@ pub fn export_checked_workbook(
     let highlight_end_column = worksheet.get_highest_column().max(annotation_index as u32);
 
     for row in &report.rows {
-        if row.status == RowStatus::Changed {
+        if matches!(row.status, RowStatus::Changed | RowStatus::Incomplete) {
             let calculated = row
                 .calculated_size
                 .ok_or_else(|| anyhow!("第 {} 行缺少计算结果", row.row_number))?;
             worksheet
                 .get_cell_mut((3_u32, row.row_number))
                 .set_value(calculated.as_str());
+        }
+
+        if row.status == RowStatus::Changed {
             worksheet
                 .get_cell_mut((annotation_index as u32, row.row_number))
                 .set_value(&row.annotation);
@@ -80,12 +86,23 @@ pub fn export_checked_workbook(
         if let Some(fill) = fill {
             highlight_row(worksheet, row.row_number, highlight_end_column, fill);
         }
+        if classification_was_changed(row) {
+            worksheet
+                .get_style_mut((3_u32, row.row_number))
+                .set_background_color(CHANGED_CELL_FILL);
+        }
     }
 
     expand_auto_filter(worksheet, annotation_index as u32);
 
     umya_spreadsheet::writer::xlsx::write(&workbook, output_path)
         .with_context(|| format!("无法写入核对结果：{}", output_path.display()))
+}
+
+fn classification_was_changed(row: &CheckRow) -> bool {
+    row.calculated_size
+        .is_some_and(|size| row.original_value != size.as_str())
+        && matches!(row.status, RowStatus::Changed | RowStatus::Incomplete)
 }
 
 fn ensure_annotation_cells_available(
@@ -224,10 +241,11 @@ mod tests {
         let expected_changed_rows = report
             .rows
             .iter()
-            .filter(|row| row.status == RowStatus::Changed)
+            .filter(|row| classification_was_changed(row))
             .map(|row| row.row_number)
             .collect::<Vec<_>>();
         assert_eq!(changed_rows, expected_changed_rows);
+        assert_eq!(changed_rows.len(), 43);
 
         for row in 0..source_range.height() {
             for column in 0..source_range.width() {
@@ -270,6 +288,31 @@ mod tests {
 
         let output_book = umya_spreadsheet::reader::xlsx::read(&output).unwrap();
         let output_sheet = output_book.get_sheet_by_name(&report.sheet_name).unwrap();
+        for row in &report.rows {
+            if matches!(row.status, RowStatus::Changed | RowStatus::Incomplete) {
+                assert_eq!(
+                    output_sheet
+                        .get_cell((3_u32, row.row_number))
+                        .unwrap()
+                        .get_value(),
+                    row.calculated_size.unwrap().as_str(),
+                    "unexpected classification at C{}",
+                    row.row_number
+                );
+            }
+            if classification_was_changed(row) {
+                assert_eq!(
+                    output_sheet
+                        .get_style((3_u32, row.row_number))
+                        .get_background_color()
+                        .unwrap()
+                        .get_argb(),
+                    CHANGED_CELL_FILL,
+                    "changed cell C{} is not green",
+                    row.row_number
+                );
+            }
+        }
         assert_eq!(
             output_sheet
                 .get_auto_filter()
@@ -305,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn export_highlights_incomplete_and_failed_rows_without_changing_classification() {
+    fn export_updates_incomplete_classification_and_marks_changed_cells_green() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source.xlsx");
         let output = directory.path().join("output.xlsx");
@@ -360,9 +403,9 @@ mod tests {
 
         let output_book = umya_spreadsheet::reader::xlsx::read(&output).unwrap();
         let output_sheet = output_book.get_sheet_by_name("Sheet1").unwrap();
-        assert_eq!(output_sheet.get_cell("C2").unwrap().get_value(), "中型");
+        assert_eq!(output_sheet.get_cell("C2").unwrap().get_value(), "小型");
         assert_eq!(output_sheet.get_cell("C3").unwrap().get_value(), "小型");
-        for column in [1_u32, 3, 17] {
+        for column in [1_u32, 17] {
             assert_eq!(
                 output_sheet
                     .get_style((column, 2_u32))
@@ -371,6 +414,16 @@ mod tests {
                     .get_argb(),
                 INCOMPLETE_ROW_FILL
             );
+        }
+        assert_eq!(
+            output_sheet
+                .get_style((3_u32, 2_u32))
+                .get_background_color()
+                .unwrap()
+                .get_argb(),
+            CHANGED_CELL_FILL
+        );
+        for column in [1_u32, 3, 17] {
             assert_eq!(
                 output_sheet
                     .get_style((column, 3_u32))
@@ -387,6 +440,41 @@ mod tests {
         assert_eq!(
             output_sheet.get_cell("Q3").unwrap().get_value(),
             "处理失败：行业代码为空"
+        );
+    }
+
+    #[test]
+    fn export_keeps_unchanged_incomplete_classification_yellow() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.xlsx");
+        let output = directory.path().join("output.xlsx");
+        let mut workbook = umya_spreadsheet::new_file();
+        workbook
+            .get_sheet_by_name_mut("Sheet1")
+            .unwrap()
+            .get_cell_mut("C2")
+            .set_value("小型");
+        umya_spreadsheet::writer::xlsx::write(&workbook, &source).unwrap();
+        let mut report = sample_report(source);
+        report.rows[0].status = RowStatus::Incomplete;
+        report.rows[0].original_value = "小型".to_owned();
+        report.rows[0].calculated_size = Some(CompanySize::Small);
+        report.rows[0].annotation = "单一字段判断准确：数据不完整".to_owned();
+        report.summary.changed_rows = 0;
+        report.summary.incomplete_rows = 1;
+
+        export_checked_workbook(&report, &output).unwrap();
+
+        let output_book = umya_spreadsheet::reader::xlsx::read(&output).unwrap();
+        let output_sheet = output_book.get_sheet_by_name("Sheet1").unwrap();
+        assert_eq!(output_sheet.get_cell("C2").unwrap().get_value(), "小型");
+        assert_eq!(
+            output_sheet
+                .get_style((3_u32, 2_u32))
+                .get_background_color()
+                .unwrap()
+                .get_argb(),
+            INCOMPLETE_ROW_FILL
         );
     }
 
