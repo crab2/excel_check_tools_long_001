@@ -1,6 +1,6 @@
 [package]
 name = "industry-excel-checker"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "基于行业分类与企业划型标准的 Excel 桌面核对工具"
 
